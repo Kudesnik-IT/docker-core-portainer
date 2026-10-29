@@ -1,0 +1,127 @@
+name: "${COMPOSE_PROJECT_NAME}"
+
+#######################################
+########## Description ################
+#
+# ----- CORE PORTAINER + SOCKET PROXY -----
+# Безопасная панель управления Docker с фильтрацией API-запросов
+#
+#######################################
+
+############################
+########## ANCHORS #########
+x-logging: &default_logging
+  driver: "local"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-security: &default_security
+  cap_drop:
+    - ALL
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+
+####################################
+########## SETUP SERVICES ##########
+services:
+
+  #--------- SOCKET PROXY - Фильтр Docker API ---------#
+  socket-proxy:
+    image: ${SOCKET_PROXY_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME}-proxy
+    <<: *default_security
+    cpu_shares: 512
+    deploy:
+      resources:
+        limits:
+          cpus: '0.20'
+          memory: 64M
+          pids: 50
+        reservations:
+          cpus: '0.05'
+          memory: 16M
+    env_file:
+      - socket-proxy.env
+    environment:
+      - TZ=${TZ}
+      - LOG_LEVEL=notice
+      # Управляемые из .env повышенные привилегии
+      - POST=${PROXY_POST:-0}
+      - EXEC=${PROXY_EXEC:-0}
+    tmpfs:
+      # Обязателен для генерации конфига HAProxy при read_only: true
+      - /run:rw,noexec,nosuid,size=16m,mode=1777
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *default_logging
+    networks:
+      - socket_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:2375/version"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+  #--------- PORTAINER CE - Веб-интерфейс ---------#
+  portainer:
+    image: ${PORTAINER_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME}-app
+    <<: *default_security
+    cpu_shares: 512
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+          pids: 100
+        reservations:
+          cpus: '0.10'
+          memory: 64M
+    command:
+      - "-H"
+      - "tcp://socket-proxy:2375"
+    depends_on:
+      socket-proxy:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    volumes:
+      - portainer_data:/data
+    logging: *default_logging
+    networks:
+      - socket_net
+      - web_net
+    ports:
+      - "${HOST_IP}:${PORTAINER_HTTPS_PORT}:9443"
+      - "${HOST_IP:?Не задан HOST_IP в файле .env}:${PORTAINER_HTTPS_PORT:-9443}:9443"
+    restart: unless-stopped
+    healthcheck:
+      # Проверяем HTTP-порт, Portainer слушает 9443 (HTTPS) и 9000 (HTTP)
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9000/api/system/status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+###################################
+########## SETUP VOLUMES ##########
+volumes:
+  portainer_data:
+    name: ${COMPOSE_PROJECT_NAME}_data
+
+###################################
+########## SETUP NETWORKS #########
+networks:
+  # Полностью изолированная сеть без выхода во внешний мир для связи с прокси
+  socket_net:
+    name: ${COMPOSE_PROJECT_NAME}_socket_net
+    driver: bridge
+    internal: true
+  # Сеть для публикации веб-интерфейса Portainer
+  web_net:
+    name: ${COMPOSE_PROJECT_NAME}_web_net
+    driver: bridge
