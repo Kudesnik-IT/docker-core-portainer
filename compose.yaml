@@ -96,7 +96,6 @@ services:
       - socket_net
       - web_net
     ports:
-      - "${HOST_IP}:${PORTAINER_HTTPS_PORT}:9443"
       - "${HOST_IP:?Не задан HOST_IP в файле .env}:${PORTAINER_HTTPS_PORT:-9443}:9443"
     restart: unless-stopped
     healthcheck:
